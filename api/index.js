@@ -1,10 +1,10 @@
 // api/index.js
-// Fully robust Vercel API with fallback dataset, TMDB caching, and safe fetch
+// Robust Vercel API with safe fetch, extended timeout, TMDB caching, and fallback
 
 const tmdbCache = {}; // In-memory TMDB cache
-const CACHE_TTL = 1000 * 60 * 60 * 24; // 24 hours
+const CACHE_TTL = 1000 * 60 * 60 * 24; // 24h
 
-// Local fallback dataset if InfinityFree fails
+// Fallback movies if InfinityFree fails or is slow
 const fallbackMovies = [
   {
     id: 1271,
@@ -22,7 +22,7 @@ const fallbackMovies = [
   }
 ];
 
-// Helper: slugify title
+// Helper: create URL slug
 function slugify(text) {
   return text
     .toString()
@@ -34,15 +34,22 @@ function slugify(text) {
     .replace(/-+$/, "");
 }
 
-// Safe fetch JSON
-async function fetchJSON(url) {
-  try {
-    const res = await fetch(url, { timeout: 10000 });
-    const text = await res.text();
-    return JSON.parse(text);
-  } catch {
-    return null; // network error or invalid JSON
-  }
+// Safe fetch JSON with timeout
+async function fetchJSON(url, timeout = 30000) { // 30s timeout for slow InfinityFree
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), timeout);
+    fetch(url)
+      .then(r => r.text())
+      .then(text => {
+        clearTimeout(timer);
+        try {
+          resolve(JSON.parse(text));
+        } catch {
+          resolve(null);
+        }
+      })
+      .catch(() => resolve(null));
+  });
 }
 
 export default async function handler(req, res) {
@@ -55,19 +62,17 @@ export default async function handler(req, res) {
   const queryTitle = req.query.title || "";
   const IF_URL = `https://blackseal.xyz/api/api.php${queryId ? `?id=${queryId}` : queryTitle ? `?title=${queryTitle}` : ""}`;
 
-  // 1️⃣ Try fetching InfinityFree data
+  // 1️⃣ Fetch movies from InfinityFree with safe fallback
   let movies = [];
-  const ifData = await fetchJSON(IF_URL);
+  const ifData = await fetchJSON(IF_URL, 30000); // wait up to 30s
   if (ifData && ifData.ok && Array.isArray(ifData.data) && ifData.data.length > 0) {
     movies = ifData.data;
   } else {
-    // Use fallback dataset if InfinityFree fails
-    movies = fallbackMovies;
+    movies = fallbackMovies; // fallback if InfinityFree fails
   }
 
-  // 2️⃣ Fetch TMDB data in parallel with caching
+  // 2️⃣ Parallel TMDB fetch with caching
   const sections = { "Recently added": [] };
-
   const moviePromises = movies.map(async movie => {
     let tmdbData = {};
 
@@ -87,7 +92,6 @@ export default async function handler(req, res) {
     }
 
     const slug = slugify(movie.title || "none");
-
     return {
       title: movie.title || "none",
       link: `https://multimovies.city/movies/${slug}/`,
@@ -104,7 +108,7 @@ export default async function handler(req, res) {
     const moviesData = await Promise.all(moviePromises);
     sections["Recently added"] = moviesData;
   } catch {
-    // fallback if something fails
+    // fallback if TMDB fetch fails
     sections["Recently added"] = fallbackMovies.map(m => ({
       title: m.title,
       link: `https://multimovies.city/movies/${slugify(m.title)}/`,
