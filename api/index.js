@@ -1,23 +1,11 @@
 // api/index.js
-// Vercel API: fetch InfinityFree, enrich with TMDB, fully robust
+// Vercel API: fetch TMDB data with fields selection and caching
 
 const tmdbCache = {}; // In-memory TMDB cache
 const CACHE_TTL = 1000 * 60 * 60 * 24; // 24 hours
 
-// Helper: slugify
-function slugify(text) {
-  return text
-    .toString()
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^\w\-]+/g, "")
-    .replace(/\-\-+/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+$/, "");
-}
-
-// Safe fetch JSON with timeout
-async function fetchJSON(url, timeout = 30000) {
+// Safe fetch JSON
+async function fetchJSON(url, timeout = 15000) { // 15s timeout
   return new Promise(resolve => {
     const timer = setTimeout(() => resolve(null), timeout);
     fetch(url)
@@ -30,98 +18,92 @@ async function fetchJSON(url, timeout = 30000) {
   });
 }
 
-// Local fallback movies if InfinityFree fails
-const fallbackMovies = [
-  {
-    id: 1271,
-    tmdb_id: 22855,
-    title: "Superman/Batman: Public Enemies",
-    genre: "Action, Adventure, Animation, Family, Science Fiction",
-    src: [
-      "https://www.youtube.com/embed/k2gq7YeMS40?autoplay=0&autohide=1",
-      "https://multimoviesshg.com/e/ld4ma7fmwtd1",
-      "https://sbplay.org/embed-9zcehdcf50in.html",
-      "https://dood.la/e/sahulbtjqq6r",
-      "https://mixdrop.co/e/vnevgdp7cv8wzl",
-      "https://hydrax.net/watch?v=lrVlK_Uk5V"
-    ]
-  }
-];
+// Helper: slugify movie title
+function slugify(text) {
+  return text
+    .toString()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\w\-]+/g, "")
+    .replace(/\-\-+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
+}
 
+// API handler
 export default async function handler(req, res) {
   const TMDB_API_KEY = process.env.TMDB_API_KEY;
   if (!TMDB_API_KEY) return res.status(500).json({ ok: false, error: "TMDB_API_KEY missing" });
 
-  const queryId = req.query.id || "";
-  const queryTitle = req.query.title || "";
-  const IF_URL = `https://blackseal.xyz/api/api.php${queryId ? `?id=${queryId}` : queryTitle ? `?title=${queryTitle}` : ""}`;
+  const tmdb_id = req.query.id;
+  const fields = req.query.fields || "all"; // e.g., "poster,year,rating,genre"
 
-  // 1️⃣ Fetch InfinityFree movies safely
-  let movies = [];
-  const ifData = await fetchJSON(IF_URL, 30000);
-  if (ifData && ifData.ok && Array.isArray(ifData.data) && ifData.data.length > 0) {
-    movies = ifData.data;
-  } else {
-    movies = fallbackMovies;
+  if (!tmdb_id) return res.status(400).json({ ok: false, error: "Missing id parameter" });
+
+  // 1️⃣ Check cache
+  if (tmdbCache[tmdb_id] && (Date.now() - tmdbCache[tmdb_id].timestamp < CACHE_TTL)) {
+    const cached = tmdbCache[tmdb_id].data;
+    return res.status(200).json({ ok: true, data: filterFields(cached, fields) });
   }
 
-  // 2️⃣ Ensure movies array is not empty
-  if (!movies.length) movies = fallbackMovies;
+  // 2️⃣ Fetch TMDB details
+  const tmdbData = await fetchJSON(`https://api.themoviedb.org/3/movie/${tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`);
+  if (!tmdbData) return res.status(500).json({ ok: false, error: "Failed to fetch TMDB data" });
 
-  // 3️⃣ Fetch TMDB details in parallel
-  const sections = { "Recently added": [] };
-  const promises = movies.map(async movie => {
-    let tmdbData = {};
+  // 3️⃣ Store cache
+  tmdbCache[tmdb_id] = { data: tmdbData, timestamp: Date.now() };
 
-    if (movie.tmdb_id && movie.tmdb_id !== 0) {
-      const cached = tmdbCache[movie.tmdb_id];
-      if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
-        tmdbData = cached.data;
-      } else {
-        try {
-          const resp = await fetchJSON(`https://api.themoviedb.org/3/movie/${movie.tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`);
-          tmdbData = resp || {};
-          tmdbCache[movie.tmdb_id] = { data: tmdbData, timestamp: Date.now() };
-        } catch { tmdbData = {}; }
-      }
+  // 4️⃣ Return filtered or all data
+  res.status(200).json({ ok: true, data: filterFields(tmdbData, fields) });
+}
+
+// Helper: select fields or return all
+function filterFields(data, fields) {
+  if (!fields || fields === "all") return data;
+
+  const fieldList = fields.split(",").map(f => f.trim().toLowerCase());
+  const result = {};
+
+  fieldList.forEach(f => {
+    switch(f) {
+      case "poster":
+        result.poster = data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : "none";
+        break;
+      case "tmdb_image":
+        result.tmdb_image = data.poster_path ? `https://image.tmdb.org/t/p/original${data.poster_path}` : "none";
+        break;
+      case "year":
+        result.year = data.release_date || "none";
+        break;
+      case "rating":
+        result.rating = data.vote_average ? data.vote_average.toFixed(1) : "none";
+        break;
+      case "title":
+        result.title = data.title || "none";
+        break;
+      case "overview":
+        result.overview = data.overview || "none";
+        break;
+      case "genres":
+        result.genres = data.genres && Array.isArray(data.genres) ? data.genres.map(g => g.name).join(", ") : "none";
+        break;
+      case "runtime":
+        result.runtime = data.runtime || "none";
+        break;
+      case "release_date":
+        result.release_date = data.release_date || "none";
+        break;
+      case "id":
+        result.id = data.id || "none";
+        break;
+      case "all":
+        Object.assign(result, data);
+        break;
+      default:
+        if (data[f] !== undefined) result[f] = data[f];
+        else result[f] = "none";
     }
-
-    const slug = slugify(movie.title || "none");
-
-    return {
-      title: movie.title || "none",
-      link: `https://multimovies.city/movies/${slug}/`,
-      date_or_year: tmdbData.release_date || movie.year || "none",
-      rating: tmdbData.vote_average ? tmdbData.vote_average.toFixed(1) : "none",
-      original_image: tmdbData.poster_path ? `https://image.tmdb.org/t/p/original${tmdbData.poster_path}` : "none",
-      tmdb_image: tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : "none",
-      src: movie.src && movie.src.length ? movie.src : ["none"],
-      genre: movie.genre || "none"
-    };
   });
 
-  try {
-    sections["Recently added"] = await Promise.all(promises);
-  } catch {
-    // fallback if TMDB fetch fails
-    sections["Recently added"] = fallbackMovies.map(m => ({
-      title: m.title,
-      link: `https://multimovies.city/movies/${slugify(m.title)}/`,
-      date_or_year: "none",
-      rating: "none",
-      original_image: "none",
-      tmdb_image: "none",
-      src: m.src,
-      genre: m.genre
-    }));
-  }
-
-  // 4️⃣ Return JSON
-  res.setHeader("Content-Type", "application/json");
-  res.status(200).json({
-    ok: true,
-    page: 1,
-    total: sections["Recently added"].length,
-    sections
-  });
+  return result;
 }
