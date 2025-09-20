@@ -1,11 +1,11 @@
 // api/index.js
-// Robust Vercel API with safe fetch, extended timeout, TMDB caching, and fallback
+// Fully working Vercel API without depending on InfinityFree fetch
 
 const tmdbCache = {}; // In-memory TMDB cache
 const CACHE_TTL = 1000 * 60 * 60 * 24; // 24h
 
-// Fallback movies if InfinityFree fails or is slow
-const fallbackMovies = [
+// Hardcoded movie list (can update manually)
+const movies = [
   {
     id: 1271,
     tmdb_id: 22855,
@@ -19,7 +19,8 @@ const fallbackMovies = [
       "https://mixdrop.co/e/vnevgdp7cv8wzl",
       "https://hydrax.net/watch?v=lrVlK_Uk5V"
     ]
-  }
+  },
+  // Add more movies here manually
 ];
 
 // Helper: create URL slug
@@ -34,22 +35,15 @@ function slugify(text) {
     .replace(/-+$/, "");
 }
 
-// Safe fetch JSON with timeout
-async function fetchJSON(url, timeout = 30000) { // 30s timeout for slow InfinityFree
-  return new Promise(resolve => {
-    const timer = setTimeout(() => resolve(null), timeout);
-    fetch(url)
-      .then(r => r.text())
-      .then(text => {
-        clearTimeout(timer);
-        try {
-          resolve(JSON.parse(text));
-        } catch {
-          resolve(null);
-        }
-      })
-      .catch(() => resolve(null));
-  });
+// Safe fetch JSON for TMDB
+async function fetchJSON(url) {
+  try {
+    const res = await fetch(url);
+    const text = await res.text();
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 export default async function handler(req, res) {
@@ -58,22 +52,21 @@ export default async function handler(req, res) {
     return res.status(500).json({ ok: false, error: "TMDB_API_KEY missing" });
   }
 
-  const queryId = req.query.id || "";
-  const queryTitle = req.query.title || "";
-  const IF_URL = `https://blackseal.xyz/api/api.php${queryId ? `?id=${queryId}` : queryTitle ? `?title=${queryTitle}` : ""}`;
+  // Optional query filter
+  const queryId = req.query.id;
+  const queryTitle = req.query.title;
 
-  // 1️⃣ Fetch movies from InfinityFree with safe fallback
-  let movies = [];
-  const ifData = await fetchJSON(IF_URL, 30000); // wait up to 30s
-  if (ifData && ifData.ok && Array.isArray(ifData.data) && ifData.data.length > 0) {
-    movies = ifData.data;
-  } else {
-    movies = fallbackMovies; // fallback if InfinityFree fails
+  let filteredMovies = movies;
+
+  if (queryId) {
+    filteredMovies = movies.filter(m => String(m.tmdb_id) === String(queryId));
+  } else if (queryTitle) {
+    filteredMovies = movies.filter(m => m.title.toLowerCase().includes(queryTitle.toLowerCase()));
   }
 
-  // 2️⃣ Parallel TMDB fetch with caching
+  // Fetch TMDB in parallel with caching
   const sections = { "Recently added": [] };
-  const moviePromises = movies.map(async movie => {
+  const moviePromises = filteredMovies.map(async movie => {
     let tmdbData = {};
 
     if (movie.tmdb_id && movie.tmdb_id !== 0) {
@@ -81,13 +74,9 @@ export default async function handler(req, res) {
       if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
         tmdbData = cached.data;
       } else {
-        try {
-          const resp = await fetchJSON(`https://api.themoviedb.org/3/movie/${movie.tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`);
-          tmdbData = resp || {};
-          tmdbCache[movie.tmdb_id] = { data: tmdbData, timestamp: Date.now() };
-        } catch {
-          tmdbData = {};
-        }
+        const resp = await fetchJSON(`https://api.themoviedb.org/3/movie/${movie.tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`);
+        tmdbData = resp || {};
+        tmdbCache[movie.tmdb_id] = { data: tmdbData, timestamp: Date.now() };
       }
     }
 
@@ -95,7 +84,7 @@ export default async function handler(req, res) {
     return {
       title: movie.title || "none",
       link: `https://multimovies.city/movies/${slug}/`,
-      date_or_year: tmdbData.release_date || movie.year || "none",
+      date_or_year: tmdbData.release_date || "none",
       rating: tmdbData.vote_average ? tmdbData.vote_average.toFixed(1) : "none",
       original_image: tmdbData.poster_path ? `https://image.tmdb.org/t/p/original${tmdbData.poster_path}` : "none",
       tmdb_image: tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : "none",
@@ -104,24 +93,8 @@ export default async function handler(req, res) {
     };
   });
 
-  try {
-    const moviesData = await Promise.all(moviePromises);
-    sections["Recently added"] = moviesData;
-  } catch {
-    // fallback if TMDB fetch fails
-    sections["Recently added"] = fallbackMovies.map(m => ({
-      title: m.title,
-      link: `https://multimovies.city/movies/${slugify(m.title)}/`,
-      date_or_year: "none",
-      rating: "none",
-      original_image: "none",
-      tmdb_image: "none",
-      src: m.src,
-      genre: m.genre
-    }));
-  }
+  sections["Recently added"] = await Promise.all(moviePromises);
 
-  // 3️⃣ Return JSON
   res.setHeader("Content-Type", "application/json");
   res.status(200).json({
     ok: true,
