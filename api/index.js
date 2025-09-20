@@ -1,5 +1,5 @@
 // api/index.js
-// Fully robust Vercel API with TMDB caching and InfinityFree fallback
+// Fully robust Vercel API with parallel TMDB fetch, caching, and safe fallback
 
 const tmdbCache = {}; // In-memory TMDB cache
 const CACHE_TTL = 1000 * 60 * 60 * 24; // 24h
@@ -37,18 +37,18 @@ export default async function handler(req, res) {
     return res.status(500).json({ ok: false, error: "TMDB_API_KEY missing" });
   }
 
-  // Build InfinityFree URL
+  // 1️⃣ Build InfinityFree URL
   const queryId = req.query.id || "";
   const queryTitle = req.query.title || "";
   const IF_URL = `https://blackseal.xyz/api/api.php${queryId ? `?id=${queryId}` : queryTitle ? `?title=${queryTitle}` : ""}`;
 
-  // 1️⃣ Fetch movies from InfinityFree safely
+  // 2️⃣ Fetch movies from InfinityFree safely
   let movies = [];
   const ifData = await fetchJSON(IF_URL);
   if (ifData && ifData.ok && Array.isArray(ifData.data)) {
     movies = ifData.data;
   } else {
-    // fallback movie if InfinityFree fails
+    // fallback
     movies = [{
       id: "none",
       tmdb_id: 0,
@@ -58,13 +58,14 @@ export default async function handler(req, res) {
     }];
   }
 
-  // 2️⃣ Build sections with TMDB caching
+  // 3️⃣ Build sections with parallel TMDB fetch
   const sections = { "Recently added": [] };
 
-  for (let movie of movies) {
+  // Create an array of promises for TMDB fetch
+  const moviePromises = movies.map(async movie => {
     let tmdbData = {};
 
-    // Check cache
+    // Use cache if available
     const cached = tmdbCache[movie.tmdb_id];
     if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
       tmdbData = cached.data;
@@ -79,7 +80,7 @@ export default async function handler(req, res) {
     }
 
     const slug = slugify(movie.title || "none");
-    sections["Recently added"].push({
+    return {
       title: movie.title || "none",
       link: `https://multimovies.city/movies/${slug}/`,
       date_or_year: tmdbData.release_date || movie.year || "none",
@@ -88,61 +89,27 @@ export default async function handler(req, res) {
       tmdb_image: tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : "none",
       src: movie.src && movie.src.length ? movie.src : ["none"],
       genre: movie.genre || "none"
-    });
-  }
-
-  // 3️⃣ Return JSON
-  res.setHeader("Content-Type", "application/json");
-  res.status(200).json({
-    ok: true,
-    page: 1,
-    total: sections["Recently added"].length,
-    sections
+    };
   });
-}    movies = [{
-      id: "none",
-      tmdb_id: 0,
+
+  try {
+    const moviesData = await Promise.all(moviePromises);
+    sections["Recently added"] = moviesData;
+  } catch (e) {
+    // fallback if parallel fetch fails
+    sections["Recently added"] = [{
       title: "none",
-      genre: "none",
-      src: []
+      link: "#",
+      date_or_year: "none",
+      rating: "none",
+      original_image: "none",
+      tmdb_image: "none",
+      src: ["none"],
+      genre: "none"
     }];
   }
 
-  // 2️⃣ Build sections with TMDB caching
-  const sections = { "Recently added": [] };
-
-  for (let movie of movies) {
-    let tmdbData = {};
-
-    // Use cache if available
-    const cached = tmdbCache[movie.tmdb_id];
-    if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
-      tmdbData = cached.data;
-    } else if (movie.tmdb_id && movie.tmdb_id !== 0) {
-      // Fetch from TMDB
-      try {
-        const tmdbResp = await fetch(`https://api.themoviedb.org/3/movie/${movie.tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`);
-        tmdbData = await tmdbResp.json();
-        tmdbCache[movie.tmdb_id] = { data: tmdbData, timestamp: Date.now() };
-      } catch (e) {
-        tmdbData = {};
-      }
-    }
-
-    const slug = slugify(movie.title || "none");
-    sections["Recently added"].push({
-      title: movie.title || "none",
-      link: `https://multimovies.city/movies/${slug}/`,
-      date_or_year: tmdbData.release_date || movie.year || "none",
-      rating: tmdbData.vote_average ? tmdbData.vote_average.toFixed(1) : "none",
-      original_image: tmdbData.poster_path ? `https://image.tmdb.org/t/p/original${tmdbData.poster_path}` : "none",
-      tmdb_image: tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : "none",
-      src: movie.src && movie.src.length ? movie.src : ["none"],
-      genre: movie.genre || "none"
-    });
-  }
-
-  // 3️⃣ Return JSON
+  // 4️⃣ Return JSON
   res.setHeader("Content-Type", "application/json");
   res.status(200).json({
     ok: true,
