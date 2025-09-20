@@ -1,5 +1,9 @@
 // api/index.js
-import fetch from "node-fetch";
+// Fully dependency-free Vercel API with in-memory TMDB caching
+
+// Simple in-memory cache
+const tmdbCache = {}; // { tmdb_id: {data, timestamp} }
+const CACHE_TTL = 1000 * 60 * 60 * 24; // 24 hours
 
 // Helper: create slug from title
 function slugify(text) {
@@ -33,16 +37,25 @@ export default async function handler(req, res) {
     return res.status(500).json({ ok: false, error: "Failed to fetch InfinityFree data", details: e.message });
   }
 
-  // 2️⃣ Fetch TMDB details for each movie
+  // 2️⃣ Build sections with TMDB caching
   const sections = { "Recently added": [] };
 
   for (let movie of movies) {
     let tmdbData = {};
-    try {
-      const tmdbResp = await fetch(`https://api.themoviedb.org/3/movie/${movie.tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`);
-      tmdbData = await tmdbResp.json();
-    } catch (e) {
-      tmdbData = {};
+
+    // Check cache
+    const cached = tmdbCache[movie.tmdb_id];
+    if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+      tmdbData = cached.data;
+    } else {
+      // Fetch from TMDB
+      try {
+        const tmdbResp = await fetch(`https://api.themoviedb.org/3/movie/${movie.tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`);
+        tmdbData = await tmdbResp.json();
+        tmdbCache[movie.tmdb_id] = { data: tmdbData, timestamp: Date.now() };
+      } catch (e) {
+        tmdbData = {};
+      }
     }
 
     const slug = slugify(movie.title);
