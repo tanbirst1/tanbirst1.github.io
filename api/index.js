@@ -6,11 +6,11 @@ const CACHE_TTL = 1000 * 60 * 60 * 24; // 24 hours
 
 // Safe fetch JSON
 async function fetchJSON(url, timeout = 15000) {
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(null), timeout);
     fetch(url)
-      .then(r => r.text())
-      .then(text => {
+      .then((r) => r.text())
+      .then((text) => {
         clearTimeout(timer);
         try {
           resolve(JSON.parse(text));
@@ -79,8 +79,20 @@ export default async function handler(req, res) {
 async function filterFields(data, fields, TMDB_API_KEY) {
   if (!fields || fields === "all") return data;
 
-  const fieldList = fields.split(",").map(f => f.trim().toLowerCase());
+  const fieldList = fields.split(",").map((f) => f.trim().toLowerCase());
   const result = {};
+
+  // Check if cast is requested
+  let fetchCredits = false;
+  if (fieldList.includes("cast")) fetchCredits = true;
+
+  // Fetch credits once if needed
+  let credits = null;
+  if (fetchCredits) {
+    credits = await fetchJSON(
+      `https://api.themoviedb.org/3/movie/${data.id}/credits?api_key=${TMDB_API_KEY}&language=en-US`
+    );
+  }
 
   for (const f of fieldList) {
     switch (f) {
@@ -111,7 +123,7 @@ async function filterFields(data, fields, TMDB_API_KEY) {
       case "genres":
         result.genres =
           data.genres && Array.isArray(data.genres)
-            ? data.genres.map(g => g.name).join(", ")
+            ? data.genres.map((g) => g.name).join(", ")
             : "none";
         break;
       case "runtime":
@@ -124,11 +136,8 @@ async function filterFields(data, fields, TMDB_API_KEY) {
         result.id = data.id || "none";
         break;
       case "cast":
-        const credits = await fetchJSON(
-          `https://api.themoviedb.org/3/movie/${data.id}/credits?api_key=${TMDB_API_KEY}&language=en-US`
-        );
         if (credits && credits.cast) {
-          result.cast = credits.cast.slice(0, 10).map(c => ({
+          result.cast = credits.cast.slice(0, 10).map((c) => ({
             name: c.name,
             character: c.character,
             profile: c.profile_path
@@ -143,8 +152,7 @@ async function filterFields(data, fields, TMDB_API_KEY) {
         Object.assign(result, data);
         break;
       default:
-        if (data[f] !== undefined) result[f] = data[f];
-        else result[f] = "none";
+        result[f] = data[f] !== undefined ? data[f] : "none";
     }
   }
 
