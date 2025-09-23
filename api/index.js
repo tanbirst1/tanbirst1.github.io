@@ -22,7 +22,7 @@ async function fetchJSON(url, timeout = 15000) {
   });
 }
 
-// Helper: slugify movie title
+// Helper: slugify
 function slugify(text) {
   return text
     .toString()
@@ -41,42 +41,48 @@ export default async function handler(req, res) {
     return res.status(500).json({ ok: false, error: "TMDB_API_KEY missing" });
 
   const tmdb_id = req.query.id;
-  const fields = req.query.fields || "all"; // e.g., "poster,year,rating,cast"
+  const type = req.query.type === "tv" ? "tv" : "movie"; // default movie
+  const fields = req.query.fields || "all";
 
   if (!tmdb_id)
     return res.status(400).json({ ok: false, error: "Missing id parameter" });
 
   // 1️⃣ Check cache
+  const cacheKey = `${type}_${tmdb_id}`;
   if (
-    tmdbCache[tmdb_id] &&
-    Date.now() - tmdbCache[tmdb_id].timestamp < CACHE_TTL
+    tmdbCache[cacheKey] &&
+    Date.now() - tmdbCache[cacheKey].timestamp < CACHE_TTL
   ) {
-    const cached = tmdbCache[tmdb_id].data;
+    const cached = tmdbCache[cacheKey].data;
     return res
       .status(200)
-      .json({ ok: true, data: await filterFields(cached, fields, TMDB_API_KEY) });
+      .json({ ok: true, data: await filterFields(cached, fields, TMDB_API_KEY, type) });
   }
 
   // 2️⃣ Fetch TMDB details
   const tmdbData = await fetchJSON(
-    `https://api.themoviedb.org/3/movie/${tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`
+    `https://api.themoviedb.org/3/${type}/${tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`
   );
-  if (!tmdbData)
-    return res
-      .status(500)
-      .json({ ok: false, error: "Failed to fetch TMDB data" });
+
+  if (!tmdbData || tmdbData.success === false) {
+    return res.status(404).json({
+      ok: false,
+      error: "Not found",
+      details: tmdbData?.status_message || "Invalid TMDB id/type",
+    });
+  }
 
   // 3️⃣ Store cache
-  tmdbCache[tmdb_id] = { data: tmdbData, timestamp: Date.now() };
+  tmdbCache[cacheKey] = { data: tmdbData, timestamp: Date.now() };
 
   // 4️⃣ Return filtered or all data
   res
     .status(200)
-    .json({ ok: true, data: await filterFields(tmdbData, fields, TMDB_API_KEY) });
+    .json({ ok: true, data: await filterFields(tmdbData, fields, TMDB_API_KEY, type) });
 }
 
 // Helper: select fields or return all
-async function filterFields(data, fields, TMDB_API_KEY) {
+async function filterFields(data, fields, TMDB_API_KEY, type) {
   if (!fields || fields === "all") return data;
 
   const fieldList = fields.split(",").map((f) => f.trim().toLowerCase());
@@ -90,7 +96,7 @@ async function filterFields(data, fields, TMDB_API_KEY) {
   let credits = null;
   if (fetchCredits) {
     credits = await fetchJSON(
-      `https://api.themoviedb.org/3/movie/${data.id}/credits?api_key=${TMDB_API_KEY}&language=en-US`
+      `https://api.themoviedb.org/3/${type}/${data.id}/credits?api_key=${TMDB_API_KEY}&language=en-US`
     );
   }
 
@@ -107,7 +113,7 @@ async function filterFields(data, fields, TMDB_API_KEY) {
           : "none";
         break;
       case "year":
-        result.year = data.release_date || "none";
+        result.year = data.release_date || data.first_air_date || "none";
         break;
       case "rating":
         result.rating = data.vote_average
@@ -115,7 +121,7 @@ async function filterFields(data, fields, TMDB_API_KEY) {
           : "none";
         break;
       case "title":
-        result.title = data.title || "none";
+        result.title = data.title || data.name || "none";
         break;
       case "overview":
         result.overview = data.overview || "none";
@@ -127,10 +133,10 @@ async function filterFields(data, fields, TMDB_API_KEY) {
             : "none";
         break;
       case "runtime":
-        result.runtime = data.runtime || "none";
+        result.runtime = data.runtime || data.episode_run_time?.[0] || "none";
         break;
       case "release_date":
-        result.release_date = data.release_date || "none";
+        result.release_date = data.release_date || data.first_air_date || "none";
         break;
       case "id":
         result.id = data.id || "none";
