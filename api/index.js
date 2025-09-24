@@ -43,12 +43,14 @@ export default async function handler(req, res) {
   const tmdb_id = req.query.id;
   const type = req.query.type === "tv" ? "tv" : "movie"; // default movie
   const fields = req.query.fields || "all";
+  const seasonNo = parseInt(req.query.season || "1", 10);
+  const episodeNo = req.query.episode ? parseInt(req.query.episode, 10) : null;
 
   if (!tmdb_id)
     return res.status(400).json({ ok: false, error: "Missing id parameter" });
 
   // 1️⃣ Check cache
-  const cacheKey = `${type}_${tmdb_id}`;
+  const cacheKey = `${type}_${tmdb_id}_${seasonNo}_${episodeNo || "all"}`;
   if (
     tmdbCache[cacheKey] &&
     Date.now() - tmdbCache[cacheKey].timestamp < CACHE_TTL
@@ -56,13 +58,23 @@ export default async function handler(req, res) {
     const cached = tmdbCache[cacheKey].data;
     return res
       .status(200)
-      .json({ ok: true, data: await filterFields(cached, fields, TMDB_API_KEY, type) });
+      .json({ ok: true, data: await filterFields(cached, fields, TMDB_API_KEY, type, seasonNo, episodeNo) });
   }
 
+  let tmdbData = null;
+
   // 2️⃣ Fetch TMDB details
-  const tmdbData = await fetchJSON(
-    `https://api.themoviedb.org/3/${type}/${tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`
-  );
+  if (type === "tv" && episodeNo) {
+    // Fetch specific episode
+    tmdbData = await fetchJSON(
+      `https://api.themoviedb.org/3/tv/${tmdb_id}/season/${seasonNo}/episode/${episodeNo}?api_key=${TMDB_API_KEY}&language=en-US`
+    );
+  } else {
+    // Fetch TV show or movie details
+    tmdbData = await fetchJSON(
+      `https://api.themoviedb.org/3/${type}/${tmdb_id}?api_key=${TMDB_API_KEY}&language=en-US`
+    );
+  }
 
   if (!tmdbData || tmdbData.success === false) {
     return res.status(404).json({
@@ -76,14 +88,23 @@ export default async function handler(req, res) {
   tmdbCache[cacheKey] = { data: tmdbData, timestamp: Date.now() };
 
   // 4️⃣ Return filtered or all data
-  res
-    .status(200)
-    .json({ ok: true, data: await filterFields(tmdbData, fields, TMDB_API_KEY, type) });
+  res.status(200).json({
+    ok: true,
+    data: await filterFields(tmdbData, fields, TMDB_API_KEY, type, seasonNo, episodeNo),
+  });
 }
 
 // Helper: select fields or return all
-async function filterFields(data, fields, TMDB_API_KEY, type) {
-  if (!fields || fields === "all") return data;
+async function filterFields(data, fields, TMDB_API_KEY, type, seasonNo, episodeNo) {
+  if (!fields || fields === "all") {
+    // Auto-add episode poster if TV + episode
+    if (type === "tv" && episodeNo) {
+      data.poster = data.still_path
+        ? `https://image.tmdb.org/t/p/w500${data.still_path}`
+        : "none";
+    }
+    return data;
+  }
 
   const fieldList = fields.split(",").map((f) => f.trim().toLowerCase());
   const result = {};
@@ -92,28 +113,37 @@ async function filterFields(data, fields, TMDB_API_KEY, type) {
   let fetchCredits = false;
   if (fieldList.includes("cast")) fetchCredits = true;
 
-  // Fetch credits once if needed
+  // Fetch credits if needed
   let credits = null;
   if (fetchCredits) {
-    credits = await fetchJSON(
-      `https://api.themoviedb.org/3/${type}/${data.id}/credits?api_key=${TMDB_API_KEY}&language=en-US`
-    );
+    const url =
+      type === "tv" && episodeNo
+        ? `https://api.themoviedb.org/3/tv/${data.show_id || data.id}/season/${seasonNo}/episode/${episodeNo}/credits?api_key=${TMDB_API_KEY}&language=en-US`
+        : `https://api.themoviedb.org/3/${type}/${data.id}/credits?api_key=${TMDB_API_KEY}&language=en-US`;
+    credits = await fetchJSON(url);
   }
 
   for (const f of fieldList) {
     switch (f) {
       case "poster":
-        result.poster = data.poster_path
-          ? `https://image.tmdb.org/t/p/w500${data.poster_path}`
-          : "none";
+        if (type === "tv" && episodeNo) {
+          result.poster = data.still_path
+            ? `https://image.tmdb.org/t/p/w500${data.still_path}`
+            : "none";
+        } else {
+          result.poster = data.poster_path
+            ? `https://image.tmdb.org/t/p/w500${data.poster_path}`
+            : "none";
+        }
         break;
       case "tmdb_image":
-        result.tmdb_image = data.poster_path
-          ? `https://image.tmdb.org/t/p/original${data.poster_path}`
-          : "none";
+        result.tmdb_image =
+          data.poster_path || data.still_path
+            ? `https://image.tmdb.org/t/p/original${data.poster_path || data.still_path}`
+            : "none";
         break;
       case "year":
-        result.year = data.release_date || data.first_air_date || "none";
+        result.year = data.release_date || data.first_air_date || data.air_date || "none";
         break;
       case "rating":
         result.rating = data.vote_average
@@ -121,7 +151,7 @@ async function filterFields(data, fields, TMDB_API_KEY, type) {
           : "none";
         break;
       case "title":
-        result.title = data.title || data.name || "none";
+        result.title = data.title || data.name || data.episode_number ? `Episode ${data.episode_number}: ${data.name}` : "none";
         break;
       case "overview":
         result.overview = data.overview || "none";
@@ -133,13 +163,21 @@ async function filterFields(data, fields, TMDB_API_KEY, type) {
             : "none";
         break;
       case "runtime":
-        result.runtime = data.runtime || data.episode_run_time?.[0] || "none";
+        result.runtime =
+          data.runtime || data.episode_run_time?.[0] || data.runtime || "none";
         break;
       case "release_date":
-        result.release_date = data.release_date || data.first_air_date || "none";
+        result.release_date =
+          data.release_date || data.first_air_date || data.air_date || "none";
         break;
       case "id":
         result.id = data.id || "none";
+        break;
+      case "season":
+        result.season = seasonNo;
+        break;
+      case "episode":
+        result.episode = episodeNo || "all";
         break;
       case "cast":
         if (credits && credits.cast) {
@@ -160,6 +198,13 @@ async function filterFields(data, fields, TMDB_API_KEY, type) {
       default:
         result[f] = data[f] !== undefined ? data[f] : "none";
     }
+  }
+
+  // Auto-include episode poster if missing
+  if (type === "tv" && episodeNo && !result.poster) {
+    result.poster = data.still_path
+      ? `https://image.tmdb.org/t/p/w500${data.still_path}`
+      : "none";
   }
 
   return result;
