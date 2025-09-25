@@ -1,89 +1,79 @@
 // api/episodes.js
-// Vercel API: Scrape episodes from multimovies.mobi and fetch details from TMDB
+// Scrape multimovies episodes, get TMDB ID, fetch iframe sources
 
-const API_KEY = process.env.TMDB_API_KEY; // set this in Vercel env vars
+const API_KEY = process.env.TMDB_API_KEY; // set this in Vercel
 
 export default async function handler(req, res) {
   try {
     const { page = "2" } = req.query;
-
-    // Parse page range (1-3) or single number
     const pages = parsePageRange(page);
 
     let scrapedEpisodes = [];
 
-    // Scrape multiple pages
+    // Step 1: scrape episodes from multimovies
     for (let p of pages) {
       const url = `https://multimovies.mobi/episodes/page/${p}/`;
-
       const html = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (compatible; ScraperBot/1.0)" }
       }).then(r => r.text());
 
-      // Match articles
       const articleRegex = /<article class="item se episodes"[\s\S]*?<\/article>/g;
       const matches = html.match(articleRegex) || [];
 
       for (let block of matches) {
         const title = (block.match(/<h3><a[^>]*>(.*?)<\/a><\/h3>/) || [])[1] || "";
+        const link = (block.match(/<h3><a href="([^"]+)"/) || [])[1] || "";
         const serie = (block.match(/<span class="serie">(.*?)<\/span>/) || [])[1] || "";
         const episodeInfo = (block.match(/<span>(S\d+ E\d+.*?)<\/span>/) || [])[1] || "";
 
-        if (serie) {
+        if (serie && link) {
           scrapedEpisodes.push({
             serie: decodeHtml(serie),
-            episodeInfo: episodeInfo,
-            title: decodeHtml(title)
+            episodeInfo,
+            title: decodeHtml(title),
+            link
           });
         }
       }
     }
 
-    // Deduplicate by serie + episodeInfo
+    // Deduplicate
     scrapedEpisodes = deduplicate(scrapedEpisodes);
 
-    // Fetch TMDB data for each serie (once per unique serie)
-    let finalData = [];
-
+    // Step 2: map serie -> tmdbId (only once per serie)
+    let serieMap = {};
     const uniqueSeries = [...new Set(scrapedEpisodes.map(ep => ep.serie))];
 
     for (let serieName of uniqueSeries) {
       const tmdbId = await findTmdbId(serieName);
-      if (!tmdbId) continue;
+      if (tmdbId) serieMap[serieName] = tmdbId;
+    }
 
-      // Fetch all seasons
-      const showData = await fetch(
-        `https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${API_KEY}&append_to_response=seasons`
-      ).then(r => r.json());
-
-      if (showData && showData.seasons) {
-        for (let season of showData.seasons) {
-          const seasonData = await fetch(
-            `https://api.themoviedb.org/3/tv/${tmdbId}/season/${season.season_number}?api_key=${API_KEY}`
-          ).then(r => r.json());
-
-          if (seasonData.episodes) {
-            finalData.push({
-              serie: serieName,
-              tmdbId,
-              season: season.season_number,
-              episodes: seasonData.episodes.map(ep => ({
-                season: season.season_number,
-                episode: ep.episode_number,
-                title: ep.name,
-                air_date: ep.air_date || "",
-                overview: ep.overview || ""
-              }))
-            });
-          }
-        }
+    // Step 3: fetch sources for each episode via your API
+    let finalData = [];
+    for (let ep of scrapedEpisodes) {
+      const apiUrl = `https://multi-movies-api.vercel.app/api/tv?url=${encodeURIComponent(ep.link)}`;
+      let sources = [];
+      try {
+        const data = await fetch(apiUrl).then(r => r.json());
+        if (data && data.sources) sources = data.sources;
+      } catch (e) {
+        sources = [];
       }
+
+      finalData.push({
+        serie: ep.serie,
+        tmdbId: serieMap[ep.serie] || null,
+        episodeInfo: ep.episodeInfo,
+        title: ep.title,
+        link: ep.link,
+        sources
+      });
     }
 
     res.status(200).json({
       pages,
-      scrapedCount: scrapedEpisodes.length,
-      seriesCount: uniqueSeries.length,
+      total: finalData.length,
       data: finalData
     });
 
@@ -130,9 +120,7 @@ function parsePageRange(input) {
 // Find TMDB TV show by name (slug filter)
 async function findTmdbId(name) {
   const slug = slugify(name);
-  const url = `https://api.themoviedb.org/3/search/tv?api_key=${API_KEY}&query=${encodeURIComponent(
-    name
-  )}`;
+  const url = `https://api.themoviedb.org/3/search/tv?api_key=${API_KEY}&query=${encodeURIComponent(name)}`;
   const res = await fetch(url).then(r => r.json());
   if (!res.results || res.results.length === 0) return null;
 
