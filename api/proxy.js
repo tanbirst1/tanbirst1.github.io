@@ -1,19 +1,20 @@
 // api/proxy.js
-// Vercel Edge function — dependency-free proxy that adds Referer + Origin.
+// Vercel Edge function — dependency-free proxy that spoofs Referer/Origin
+// and rewrites redirect Location headers so redirects pass through the proxy.
 //
 // Usage:
-//   /api/proxy?url=https%3A%2F%2Fddn.gtxgamer.site%2Fembed%2Fk4c2vmy
+//   /api/proxy?url=<ENCODED_TARGET_URL>[&s=SECRET]
 //
-// Security:
-// - Recommended: set VERSEL_PROXY_SECRET in Vercel env and call with &s=SECRET
-// - Or set ALLOWED_HOSTS comma-separated in env to restrict target domains.
+// Environment (recommended):
+//   VERCEL_PROXY_SECRET  -> secret string to require on requests (optional)
+//   ALLOWED_HOSTS        -> comma-separated hostnames allowed (optional)
+//   FORWARD_REFERER      -> override default referer (optional)
+//   FORWARD_ORIGIN       -> override default origin (optional)
 
-export const config = {
-  runtime: 'edge'
-};
+export const config = { runtime: 'edge' };
 
-const FORWARDED_REFERER = 'https://multimovies.network/';
-const FORWARDED_ORIGIN = 'https://multimovies.network';
+const DEFAULT_REFERER = 'https://multimovies.network/';
+const DEFAULT_ORIGIN = 'https://multimovies.network';
 
 function isValidUrl(u) {
   try {
@@ -24,24 +25,25 @@ function isValidUrl(u) {
   }
 }
 
-function hostFromUrl(u) {
+function absoluteLocation(location, base) {
   try {
-    return new URL(u).hostname;
+    return new URL(location, base).href;
   } catch (e) {
-    return '';
+    return location;
   }
 }
 
 export default async function handler(req) {
-  const { searchParams } = new URL(req.url);
-  const target = searchParams.get('url');
-  const providedSecret = searchParams.get('s') || '';
+  const urlObj = new URL(req.url);
+  const sp = urlObj.searchParams;
+  const target = sp.get('url') || '';
+  const providedSecret = sp.get('s') || '';
 
   if (!target || !isValidUrl(target)) {
     return new Response('Missing or invalid url parameter', { status: 400 });
   }
 
-  // Optional security: ENV secret
+  // Optional secret enforcement
   const SECRET = process.env.VERCEL_PROXY_SECRET || '';
   if (SECRET) {
     if (!providedSecret || providedSecret !== SECRET) {
@@ -53,51 +55,85 @@ export default async function handler(req) {
   const allowedHostsEnv = (process.env.ALLOWED_HOSTS || '').trim();
   if (allowedHostsEnv) {
     const allowed = allowedHostsEnv.split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
-    const tgtHost = hostFromUrl(target).toLowerCase();
+    const tgtHost = (() => { try { return new URL(target).hostname.toLowerCase(); } catch { return ''; } })();
     if (!allowed.includes(tgtHost)) {
       return new Response('Target host not allowed', { status: 403 });
     }
   }
 
-  // Build fetch headers: copy some incoming headers but override referer/origin/user-agent
-  const outgoingHeaders = new Headers();
+  // Build outgoing headers: copy a safe subset from incoming request
+  const incoming = req.headers;
+  const outgoing = new Headers();
 
-  // Preserve some useful headers from client request (but avoid hop-by-hop headers)
-  const inbound = req.headers;
-  const preserve = ['accept', 'accept-language', 'range', 'if-range', 'cache-control'];
+  // Preserve headers that help with video streaming/partial requests
+  const preserve = ['accept', 'accept-language', 'range', 'if-range', 'if-none-match', 'if-modified-since', 'cache-control'];
   for (const name of preserve) {
-    const v = inbound.get(name);
-    if (v) outgoingHeaders.set(name, v);
+    const v = incoming.get(name);
+    if (v) outgoing.set(name, v);
   }
 
-  // Add spoofed Referer/Origin/User-Agent
-  outgoingHeaders.set('referer', FORWARDED_REFERER);
-  outgoingHeaders.set('origin', FORWARDED_ORIGIN);
+  // Set spoofed referer/origin and a browser-like UA
+  const FORWARDED_REFERER = process.env.FORWARD_REFERER || DEFAULT_REFERER;
+  const FORWARDED_ORIGIN = process.env.FORWARD_ORIGIN || DEFAULT_ORIGIN;
+  outgoing.set('referer', FORWARDED_REFERER);
+  outgoing.set('origin', FORWARDED_ORIGIN);
 
-  // Use a common browser UA; you may change or remove if target blocks specific UA
-  const ua = inbound.get('user-agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
-  outgoingHeaders.set('user-agent', ua);
+  const ua = incoming.get('user-agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
+  outgoing.set('user-agent', ua);
 
-  // Forward cookies optionally? Uncomment if you want to forward cookies from client:
-  // const cookie = inbound.get('cookie'); if (cookie) outgoingHeaders.set('cookie', cookie);
+  // Forward cookies optionally (uncomment if you need)
+  // const cookie = incoming.get('cookie'); if (cookie) outgoing.set('cookie', cookie);
 
-  // Request method: GET only for safety
-  const method = 'GET';
-
-  // Fetch the target
+  // Important: we intentionally set redirect:'manual' so we can rewrite Location headers.
   let upstreamRes;
   try {
     upstreamRes = await fetch(target, {
-      method,
-      headers: outgoingHeaders,
-      // you can set redirect: 'follow' (default) — keep it allowed
-      redirect: 'follow'
+      method: 'GET',
+      headers: outgoing,
+      redirect: 'manual' // capture 3xx and rewrite
     });
   } catch (err) {
     return new Response('Error fetching target: ' + String(err), { status: 502 });
   }
 
-  // Build response headers — copy content-type, content-length, cache-control, content-range etc.
+  // If upstream returned a redirect, rewrite Location so browser follows via this proxy.
+  if (upstreamRes.status >= 300 && upstreamRes.status < 400) {
+    const loc = upstreamRes.headers.get('location');
+    const absoluteLoc = loc ? absoluteLocation(loc, target) : null;
+
+    // Build proxied Location that points back to this API and encodes the real location.
+    const hostOrigin = `${urlObj.protocol}//${urlObj.host}`; // e.g. https://your-deploy.vercel.app
+    const secretParam = SECRET ? `&s=${encodeURIComponent(SECRET)}` : '';
+    const proxied = absoluteLoc ? `${hostOrigin}/api/proxy?url=${encodeURIComponent(absoluteLoc)}${secretParam}` : null;
+
+    const responseHeaders = new Headers();
+    // Copy useful headers from upstream (cache-related might be helpful)
+    const copyHeaderNames = ['content-type', 'cache-control', 'expires', 'pragma', 'etag'];
+    for (const name of copyHeaderNames) {
+      const v = upstreamRes.headers.get(name);
+      if (v) responseHeaders.set(name, v);
+    }
+
+    // Set rewritten Location if we have one
+    if (proxied) {
+      responseHeaders.set('location', proxied);
+    } else if (loc) {
+      // fallback: pass original location
+      responseHeaders.set('location', loc);
+    }
+
+    // CORS so front-end can embed/follow redirects
+    responseHeaders.set('access-control-allow-origin', '*');
+    responseHeaders.set('access-control-allow-credentials', 'true');
+
+    // Return the redirect status and headers (body typically empty)
+    return new Response(null, {
+      status: upstreamRes.status,
+      headers: responseHeaders
+    });
+  }
+
+  // Non-redirect: stream body back to client and copy relevant headers
   const responseHeaders = new Headers();
   const copyHeaderNames = [
     'content-type',
@@ -115,15 +151,11 @@ export default async function handler(req) {
     if (v) responseHeaders.set(name, v);
   }
 
-  // CORS: allow your front-end to embed this iframe. Adjust origin if needed.
-  // If you only embed from your own site, replace '*' with that origin.
+  // Allow embedding & CORS (adjust origin instead of '*' for more safety)
   responseHeaders.set('access-control-allow-origin', '*');
   responseHeaders.set('access-control-allow-credentials', 'true');
 
-  // Security header: prevent Vercel from blocking embedding? set X-Frame-Options removed.
-  // We do NOT set X-Frame-Options here, so the returned content is embeddable.
-
-  // Return streaming body
+  // Return the upstream response body (streaming)
   return new Response(upstreamRes.body, {
     status: upstreamRes.status,
     headers: responseHeaders
