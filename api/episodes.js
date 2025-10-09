@@ -40,7 +40,7 @@ export default async function handler(req, res) {
 
     // --- Step 1: scrape listing pages for episode entries
     for (const p of pages) {
-      const listUrl = `https://multimovies.mobi/episodes/page/${p}/`;
+      const listUrl = `https://multimovies.sale/episodes/page/${p}/`;
       const html = await fetchWithTimeout(listUrl, {
         headers: { "User-Agent": "Mozilla/5.0 (compatible; ScraperBot/1.0)" }
       }, 15000).then(r => (r.ok ? r.text() : "")).catch(() => "");
