@@ -1,10 +1,9 @@
-// ===== IMPORTANT: Vercel already provides global fetch =====
-
+// ===== CONFIG =====
 const TMDB_KEY = "d6a23baa52d45df26ba9b8f731b43d8e";
 
-/* ---------- HELPERS ---------- */
+// ===== HELPERS =====
 
-// normalize poster to w500
+// convert small poster to w500
 function w500(url) {
   if (!url) return null;
   return url.replace("/w185/", "/w500/").replace("/w300/", "/w500/");
@@ -14,11 +13,10 @@ function w500(url) {
 function getSlugFromUrl(url) {
   return url
     .replace("https://toonstream.one/movies/", "")
-    .replace("https://toonstream.one/series/", "")
     .replace(/\/$/, "");
 }
 
-// get TMDB ID from title
+// get TMDB ID from title + year
 async function getTmdbId(title, year) {
   try {
     const q = encodeURIComponent(title);
@@ -29,35 +27,35 @@ async function getTmdbId(title, year) {
     const json = await res.json();
 
     if (json.results && json.results.length > 0) {
-      return json.results[0].id; // first match
+      return json.results[0].id;
     }
     return null;
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
-// detect if result is actually a MOVIE
+// check if this is really a MOVIE
 function isMovieUrl(url) {
   return url.includes("/movies/");
 }
 
 export default async function handler(req, res) {
   try {
-    // -------- STEP 1: GET LATEST MOVIES LIST --------
+    // STEP 1 — get latest movies list
     const listRes = await fetch(
       "https://toonstream-api.ry4n.qzz.io/api/category/latest/movies"
     );
-
     const listJson = await listRes.json();
+
     const items = (listJson.results || []).filter(m => isMovieUrl(m.url));
 
-    // collect slugs
+    // collect only movie slugs
     const slugs = items.map(m => getSlugFromUrl(m.url));
 
-    // -------- STEP 2: FETCH FULL DETAILS FOR EACH MOVIE --------
     const movies = [];
 
+    // STEP 2 — fetch full details for each movie
     for (const slug of slugs) {
       const detailUrl =
         `https://toonstream-api.ry4n.qzz.io/api/movie/${slug}`;
@@ -69,7 +67,6 @@ export default async function handler(req, res) {
 
       const m = d.data.movieDetails;
 
-      // ---- get TMDB ID ----
       const tmdbId = await getTmdbId(m.title, m.year || "");
 
       movies.push({
