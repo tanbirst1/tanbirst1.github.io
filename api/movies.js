@@ -1,7 +1,7 @@
 // Vercel API Handler
 // Fetches latest movies, gets details, adds TMDB IDs, returns clean JSON
 
-const TMDB_API_KEY = d6a23baa52d45df26ba9b8f731b43d8e; // Set in Vercel env variables
+const TMDB_API_KEY = "d6a23baa52d45df26ba9b8f731b43d8e"; // Set in Vercel env variables
 
 export default async function handler(req, res) {
   try {
