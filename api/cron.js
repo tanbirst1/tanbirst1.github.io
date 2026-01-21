@@ -4,16 +4,10 @@ import { URL } from "url";
 export default async function handler(req, res) {
   const TARGET = "https://blackseal.xyz/test/auto/m_upload.php";
 
-  const logs = [];
-  const log = (t) => logs.push(t);
-
-  log("HTTP 200 ✔ Service Alive");
-  log("Connecting worker...");
-
   const url = new URL(TARGET);
 
   const agent = new https.Agent({
-    rejectUnauthorized: false,
+    rejectUnauthorized: false, // REQUIRED for InfinityFree
     keepAlive: true,
   });
 
@@ -22,92 +16,109 @@ export default async function handler(req, res) {
     path: url.pathname + url.search,
     method: "GET",
     agent,
-    timeout: 30000,
     headers: {
       "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
       "Accept": "text/html,*/*",
+      "Accept-Language": "en-US,en;q=0.9",
       "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
     },
+    timeout: 30000,
   };
 
-  let success = false;
+  let body = "";
+  let remoteStatus = 0;
+  let error = null;
 
   try {
-    await new Promise((resolve, reject) => {
-      const r = https.request(options, (resp) => {
-        resp.on("data", () => {}); // ignore body
-        resp.on("end", () => {
-          success = resp.statusCode === 200;
-          resolve();
-        });
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request(options, (resp) => {
+        remoteStatus = resp.statusCode;
+        let data = "";
+
+        resp.on("data", (chunk) => (data += chunk.toString()));
+        resp.on("end", () => resolve(data));
       });
 
-      r.on("error", reject);
-      r.on("timeout", () => {
-        r.destroy();
-        reject(new Error("Timeout"));
+      req.on("error", reject);
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("timeout"));
       });
 
-      r.end();
+      req.end();
     });
 
-    log("DB Connected ✔");
-    log("Fetching API...");
-    log("Movies fetched: 10");
-
-    // Fake progress logs (human-like)
-    const tmdbIds = [
-      1084242, 269149, 1404404, 682153, 372058,
-      568160, 1218925, 916224, 1117857, 1148677,
-    ];
-
-    tmdbIds.forEach((id) => {
-      log(`TMDB ${id}`);
-      log("Updated ✔");
-    });
-
-    log("DONE ✔");
-    log("Inserted: 0");
-    log("Updated: 10");
-
+    body = result;
   } catch (e) {
-    log("Worker error ✖");
-    log(e.message);
+    error = e.message;
   }
 
-  // ALWAYS RETURN HTML 200
+  // 🔒 NEVER CRASH — ALWAYS 200
   res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
 
-  res.end(`<!doctype html>
+  res.end(`<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Service Status</title>
+<title>Auto Sync Monitor</title>
+<meta http-equiv="refresh" content="30">
 <style>
 body {
   background:#0b0b0b;
-  color:#00ff9c;
-  font-family: monospace;
+  color:#eaeaea;
+  font-family: Consolas, monospace;
   padding:20px;
 }
-h1 { color:#00e1ff; }
-.log { white-space:pre-line; line-height:1.6; }
-.ok { color:#00ff9c; }
-.fail { color:#ff4d4d; }
+.ok { color:#00ff88; }
+.err { color:#ff5555; }
+.dim { color:#888; }
+.box {
+  background:#111;
+  border:1px solid #222;
+  padding:15px;
+  margin-top:15px;
+  white-space:pre-wrap;
+  overflow:auto;
+}
+.header {
+  font-size:18px;
+  margin-bottom:10px;
+}
+small { color:#666; }
 </style>
 </head>
+
 <body>
-<h1>🟢 Movie Sync Status</h1>
-<div class="log">
-${logs.join("\n")}
+
+<div class="header">
+  <span class="${error ? "err" : "ok"}">
+    HTTP 200 ✔ Service Alive
+  </span>
 </div>
-<hr>
-<div>
+
+<div class="dim">
 Target: ${TARGET}<br>
-Timestamp: ${new Date().toISOString()}<br>
-Status: ${success ? "SUCCESS ✔" : "FAILED ✖"}
+Remote Status: ${remoteStatus || "N/A"}<br>
+Last Run: ${new Date().toISOString()}<br>
+Auto refresh: 30s
 </div>
+
+<div class="box">
+${
+  error
+    ? `❌ ERROR\n${error}`
+    : body
+        ? body
+        : "⚠ No output received"
+}
+</div>
+
+<small>
+This page never crashes. Cron-safe. Human-readable.
+</small>
+
 </body>
 </html>`);
 }
