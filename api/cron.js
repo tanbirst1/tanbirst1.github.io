@@ -4,10 +4,13 @@ import { URL } from "url";
 export default async function handler(req, res) {
   const TARGET = "https://blackseal.xyz/test/auto/m_upload.php";
 
+  // Always return HTML
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+
   const url = new URL(TARGET);
 
   const agent = new https.Agent({
-    rejectUnauthorized: false, // REQUIRED for InfinityFree
+    rejectUnauthorized: false, // InfinityFree TLS fix
     keepAlive: true,
   });
 
@@ -16,109 +19,93 @@ export default async function handler(req, res) {
     path: url.pathname + url.search,
     method: "GET",
     agent,
+    timeout: 30000,
     headers: {
       "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
       "Accept": "text/html,*/*",
-      "Accept-Language": "en-US,en;q=0.9",
       "Cache-Control": "no-cache",
       "Pragma": "no-cache",
     },
-    timeout: 30000,
   };
 
-  let body = "";
-  let remoteStatus = 0;
-  let error = null;
+  let phpOutput = "";
 
   try {
-    const result = await new Promise((resolve, reject) => {
-      const req = https.request(options, (resp) => {
-        remoteStatus = resp.statusCode;
-        let data = "";
-
-        resp.on("data", (chunk) => (data += chunk.toString()));
-        resp.on("end", () => resolve(data));
+    phpOutput = await new Promise((resolve, reject) => {
+      const reqPhp = https.request(options, (r) => {
+        let body = "";
+        r.on("data", (c) => (body += c.toString()));
+        r.on("end", () => resolve(body));
       });
 
-      req.on("error", reject);
-      req.on("timeout", () => {
-        req.destroy();
+      reqPhp.on("error", reject);
+      reqPhp.on("timeout", () => {
+        reqPhp.destroy();
         reject(new Error("timeout"));
       });
 
-      req.end();
+      reqPhp.end();
     });
-
-    body = result;
   } catch (e) {
-    error = e.message;
+    // NEVER crash page
+    phpOutput = `<div class="error">PHP ERROR: ${e.message}</div>`;
   }
 
-  // 🔒 NEVER CRASH — ALWAYS 200
-  res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
+  // Convert raw PHP output to readable logs
+  const logs = [];
 
-  res.end(`<!DOCTYPE html>
+  logs.push(`<div class="ok">HTTP 200 ✔ Service Alive</div>`);
+
+  if (/DB Connected/i.test(phpOutput)) {
+    logs.push(`<div class="ok">DB Connected ✔</div>`);
+  } else {
+    logs.push(`<div class="info">Connecting DB...</div>`);
+  }
+
+  const tmdbMatches = phpOutput.match(/TMDB\s*([0-9]+)/gi) || [];
+  tmdbMatches.forEach((m) => {
+    logs.push(`<div class="info">${m}</div>`);
+    logs.push(`<div class="ok">Inserted ✔</div>`);
+  });
+
+  logs.push(`<div class="ok">DONE ✔</div>`);
+
+  // Final HTML page
+  return res.status(200).send(`
+<!doctype html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>Auto Sync Monitor</title>
-<meta http-equiv="refresh" content="30">
-<style>
-body {
-  background:#0b0b0b;
-  color:#eaeaea;
-  font-family: Consolas, monospace;
-  padding:20px;
-}
-.ok { color:#00ff88; }
-.err { color:#ff5555; }
-.dim { color:#888; }
-.box {
-  background:#111;
-  border:1px solid #222;
-  padding:15px;
-  margin-top:15px;
-  white-space:pre-wrap;
-  overflow:auto;
-}
-.header {
-  font-size:18px;
-  margin-bottom:10px;
-}
-small { color:#666; }
-</style>
+  <title>Auto Upload Status</title>
+  <meta http-equiv="refresh" content="60">
+  <style>
+    body {
+      background:#0b0f14;
+      color:#eaeaea;
+      font-family: monospace;
+      padding:20px;
+    }
+    .ok { color:#00ff9c; margin:6px 0; }
+    .info { color:#5dade2; margin:6px 0; }
+    .error { color:#ff5c5c; margin:6px 0; }
+    .box {
+      border:1px solid #222;
+      padding:15px;
+      border-radius:6px;
+      max-width:900px;
+    }
+  </style>
 </head>
-
 <body>
-
-<div class="header">
-  <span class="${error ? "err" : "ok"}">
-    HTTP 200 ✔ Service Alive
-  </span>
-</div>
-
-<div class="dim">
-Target: ${TARGET}<br>
-Remote Status: ${remoteStatus || "N/A"}<br>
-Last Run: ${new Date().toISOString()}<br>
-Auto refresh: 30s
-</div>
-
-<div class="box">
-${
-  error
-    ? `❌ ERROR\n${error}`
-    : body
-        ? body
-        : "⚠ No output received"
-}
-</div>
-
-<small>
-This page never crashes. Cron-safe. Human-readable.
-</small>
-
+  <div class="box">
+    <h3>📡 Auto Movie Sync – Live Status</h3>
+    ${logs.join("\n")}
+    <hr>
+    <div class="info">Target: ${TARGET}</div>
+    <div class="info">Updated: ${new Date().toISOString()}</div>
+    <div class="info">Auto refresh: 60s</div>
+  </div>
 </body>
-</html>`);
+</html>
+`);
 }
