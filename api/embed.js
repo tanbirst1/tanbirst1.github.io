@@ -5,53 +5,60 @@ export const config = {
 export default async function handler(request) {
   try {
     const { searchParams } = new URL(request.url);
-
-    // Get target URL (supports URLs with their own query params)
-    const targetUrl = searchParams.get("url");
+    let targetUrl = searchParams.get("url");
 
     if (!targetUrl) {
       return new Response(
         JSON.stringify({
           success: false,
-          error: "Missing ?url parameter",
+          error: "Missing ?url parameter (URL must be encoded)",
         }),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // Fetch the embed page
+    // Decode encoded URL safely
+    targetUrl = decodeURIComponent(targetUrl);
+
+    // Fetch WITHOUT auto-follow redirects
     const res = await fetch(targetUrl, {
+      redirect: "manual",
       headers: {
         "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "text/html",
       },
     });
 
-    if (!res.ok) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: "Failed to fetch target page",
-        }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
-      );
+    // Handle single redirect manually
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (location) {
+        targetUrl = location;
+      }
     }
 
-    const html = await res.text();
+    // Fetch final page
+    const finalRes = await fetch(targetUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "text/html",
+      },
+    });
 
-    // Extract iframe src (real video)
+    const html = await finalRes.text();
+
+    // Extract iframe src
     const iframeMatch = html.match(
       /<iframe[^>]+src=["']([^"']+)["']/i
     );
-
-    const iframeUrl = iframeMatch ? iframeMatch[1] : null;
 
     return new Response(
       JSON.stringify({
         success: true,
         source: targetUrl,
-        video_iframe: iframeUrl,
+        iframe: iframeMatch ? iframeMatch[1] : null,
       }),
       {
         headers: {
