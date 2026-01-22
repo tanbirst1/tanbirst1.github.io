@@ -1,79 +1,62 @@
-export const config = {
-  runtime: "edge",
-};
+import fetch from "node-fetch";
+import cheerio from "cheerio";
 
-export default async function handler(request) {
+export default async function handler(req, res) {
   try {
-    const fullRequestUrl = request.url;
+    // FULL raw URL (important)
+    const fullUrl = req.url;
+
+    // Extract everything after ?url=
     const marker = "?url=";
-    const pos = fullRequestUrl.indexOf(marker);
+    const index = fullUrl.indexOf(marker);
 
-    if (pos === -1) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: "Missing ?url parameter",
-        }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+    if (index === -1) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing ?url parameter",
+      });
     }
 
-    // Extract raw target URL (keep all query params)
-    let rawTarget = fullRequestUrl.slice(pos + marker.length);
+    // This preserves nested query params
+    const targetUrl = fullUrl.substring(index + marker.length);
 
-    // Clean whitespace (Edge strictness)
-    rawTarget = rawTarget.trim();
-
-    // 🔥 HARD VALIDATION (this fixes Invalid URL string)
-    let targetUrl;
+    // Validate URL manually
     try {
-      targetUrl = new URL(rawTarget).href;
+      new URL(targetUrl);
     } catch {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: "Invalid URL string (malformed target URL)",
-        }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return res.status(400).json({
+        success: false,
+        error: "Invalid URL string",
+      });
     }
 
-    // Fetch target page
-    const res = await fetch(targetUrl, {
+    // Fetch HTML
+    const response = await fetch(targetUrl, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "text/html",
+        Accept: "text/html",
       },
+      redirect: "follow",
     });
 
-    const html = await res.text();
+    const html = await response.text();
+
+    // Load cheerio
+    const $ = cheerio.load(html);
 
     // Extract iframe src
-    const iframeMatch = html.match(
-      /<iframe[^>]+src=["']([^"']+)["']/i
-    );
+    const iframeSrc = $("iframe").first().attr("src") || null;
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        source: targetUrl,
-        iframe: iframeMatch ? iframeMatch[1] : null,
-      }),
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-store",
-        },
-      }
-    );
+    return res.status(200).json({
+      success: true,
+      source: targetUrl,
+      iframe: iframeSrc,
+    });
   } catch (err) {
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error: err.message,
-      }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 }
