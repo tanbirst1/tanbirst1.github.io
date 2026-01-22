@@ -4,25 +4,27 @@ export const config = {
 
 export default async function handler(request) {
   try {
-    const { searchParams } = new URL(request.url);
-    let targetUrl = searchParams.get("url");
+    const reqUrl = request.url;
 
-    if (!targetUrl) {
+    // HARD FIX: extract everything AFTER ?url=
+    const marker = "?url=";
+    const index = reqUrl.indexOf(marker);
+
+    if (index === -1) {
       return new Response(
         JSON.stringify({
           success: false,
-          error: "Missing ?url parameter (URL must be encoded)",
+          error: "Missing ?url parameter",
         }),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // Decode encoded URL safely
-    targetUrl = decodeURIComponent(targetUrl);
+    // This preserves FULL URL including nested query params
+    const targetUrl = reqUrl.substring(index + marker.length);
 
-    // Fetch WITHOUT auto-follow redirects
+    // Fetch page (no redirect loop handling needed now)
     const res = await fetch(targetUrl, {
-      redirect: "manual",
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -30,24 +32,7 @@ export default async function handler(request) {
       },
     });
 
-    // Handle single redirect manually
-    if (res.status >= 300 && res.status < 400) {
-      const location = res.headers.get("location");
-      if (location) {
-        targetUrl = location;
-      }
-    }
-
-    // Fetch final page
-    const finalRes = await fetch(targetUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "text/html",
-      },
-    });
-
-    const html = await finalRes.text();
+    const html = await res.text();
 
     // Extract iframe src
     const iframeMatch = html.match(
