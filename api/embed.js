@@ -4,13 +4,11 @@ export const config = {
 
 export default async function handler(request) {
   try {
-    const reqUrl = request.url;
-
-    // HARD FIX: extract everything AFTER ?url=
+    const fullRequestUrl = request.url;
     const marker = "?url=";
-    const index = reqUrl.indexOf(marker);
+    const pos = fullRequestUrl.indexOf(marker);
 
-    if (index === -1) {
+    if (pos === -1) {
       return new Response(
         JSON.stringify({
           success: false,
@@ -20,10 +18,27 @@ export default async function handler(request) {
       );
     }
 
-    // This preserves FULL URL including nested query params
-    const targetUrl = reqUrl.substring(index + marker.length);
+    // Extract raw target URL (keep all query params)
+    let rawTarget = fullRequestUrl.slice(pos + marker.length);
 
-    // Fetch page (no redirect loop handling needed now)
+    // Clean whitespace (Edge strictness)
+    rawTarget = rawTarget.trim();
+
+    // 🔥 HARD VALIDATION (this fixes Invalid URL string)
+    let targetUrl;
+    try {
+      targetUrl = new URL(rawTarget).href;
+    } catch {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: "Invalid URL string (malformed target URL)",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Fetch target page
     const res = await fetch(targetUrl, {
       headers: {
         "User-Agent":
