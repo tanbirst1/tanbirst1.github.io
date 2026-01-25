@@ -105,6 +105,12 @@ function normalizeMovie(data, slug) {
     tmdb_id: null,
 
     poster: details.posterImage.replace("/w185/", "/w500/"),
+    
+    // Backdrop images - keep original size
+    backdrop: {
+      header: details.backdrop?.header || null,
+      footer: details.backdrop?.footer || null
+    },
 
     year: details.year,
     duration: details.duration,
